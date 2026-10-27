@@ -6,9 +6,10 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-# --------------------------------------------------
+
+# ==================================================
 # Configuration
-# --------------------------------------------------
+# ==================================================
 
 APP_DIR = Path(__file__).parent
 DATA_DIR = APP_DIR / "data"
@@ -37,9 +38,9 @@ st.info(
 )
 
 
-# --------------------------------------------------
+# ==================================================
 # Helper functions
-# --------------------------------------------------
+# ==================================================
 
 def normalise_name(value):
     """Normalise column names for flexible matching."""
@@ -48,6 +49,7 @@ def normalise_name(value):
 
 def find_column(columns, candidates):
     """Find a column using a list of possible names."""
+
     lookup = {
         normalise_name(col): col
         for col in columns
@@ -62,19 +64,48 @@ def find_column(columns, candidates):
     return None
 
 
+def clean_numeric(series):
+    """
+    Convert numeric strings to numbers.
+
+    Handles:
+    - Thousands separators, e.g. 92,300
+    - Surrounding whitespace
+    - Optional percentage signs
+    - Empty or invalid values
+    """
+
+    cleaned = (
+        series.astype("string")
+        .str.replace(",", "", regex=False)
+        .str.replace("%", "", regex=False)
+        .str.strip()
+    )
+
+    return pd.to_numeric(cleaned, errors="coerce")
+
+
 def load_csv(uploaded_file):
-    """Load uploaded CSV or use the local project file."""
+    """
+    Use an uploaded CSV if supplied.
+    Otherwise, load the CSV from the repository's data folder.
+    """
+
     if uploaded_file is not None:
-        return pd.read_csv(uploaded_file)
+        return pd.read_csv(uploaded_file, thousands=",")
 
     if DEFAULT_CSV.exists():
-        return pd.read_csv(DEFAULT_CSV)
+        return pd.read_csv(DEFAULT_CSV, thousands=",")
 
     return None
 
 
 def load_geojson(uploaded_file):
-    """Load uploaded GeoJSON or use the local project file."""
+    """
+    Use an uploaded GeoJSON if supplied.
+    Otherwise, load the repository's local boundary file.
+    """
+
     if uploaded_file is not None:
         return json.load(uploaded_file)
 
@@ -124,28 +155,34 @@ def detect_geojson_code_property(geojson, preferred_code):
     )
 
 
-# --------------------------------------------------
-# Sidebar: data and controls
-# --------------------------------------------------
+# ==================================================
+# Sidebar: data sources and controls
+# ==================================================
 
 with st.sidebar:
 
     st.header("Data sources")
 
+    st.caption(
+        "The app loads the CSV and GeoJSON from the repository "
+        "automatically when the files are present."
+    )
+
     csv_upload = st.file_uploader(
-        "Upload comparison CSV",
+        "Optional: upload comparison CSV",
         type=["csv"],
         help=(
-            "Upload the NHS Digital and Census comparison dataset."
+            "Optional override for the CSV stored in the "
+            "repository's data folder."
         ),
     )
 
     geo_upload = st.file_uploader(
-        "Upload local-authority GeoJSON",
+        "Optional: upload local-authority GeoJSON",
         type=["geojson", "json"],
         help=(
-            "Upload the geographical boundaries for "
-            "English local authorities."
+            "Optional override for the geographical boundaries "
+            "stored in the repository's data folder."
         ),
     )
 
@@ -164,47 +201,58 @@ with st.sidebar:
     )
 
 
-# --------------------------------------------------
-# Load the comparison dataset
-# --------------------------------------------------
+# ==================================================
+# Load comparison dataset
+# ==================================================
 
-df = load_csv(csv_upload)
+try:
+
+    df = load_csv(csv_upload)
+
+except Exception as exc:
+
+    st.error(f"Unable to read the comparison CSV: {exc}")
+    st.stop()
+
 
 if df is None:
 
-    st.warning(
-        "Comparison CSV not found. Upload the file using "
-        "the sidebar or place it at "
-        "`data/list_size_census_comparison.csv`."
+    st.error(
+        "Comparison CSV not found. Expected location:"
     )
 
-    st.markdown(
-        """
-        **Expected data fields**
+    st.code(
+        "data/list_size_census_comparison.csv"
+    )
 
-        - Local authority code
-        - Local authority name
-        - Census population
-        - GP registrations or list size
-        - Difference (optional)
-        - Percentage difference (optional)
-        - Region name (optional)
-        """
+    st.write(
+        "Upload a CSV using the sidebar, or add the file "
+        "to the data folder in your GitHub repository."
     )
 
     st.stop()
 
 
-# --------------------------------------------------
+# Remove accidental whitespace from column names.
+
+df.columns = [
+    str(column).strip()
+    for column in df.columns
+]
+
+
+# ==================================================
 # Identify source columns
-# --------------------------------------------------
+# ==================================================
 
 code_col = find_column(
     df.columns,
     [
         "Local Authority Code",
+        "Local Authority District Code",
         "LAD Code",
         "LADCD",
+        "LAD21CD",
         "GSS Code",
         "Area Code",
         "Code",
@@ -215,6 +263,7 @@ name_col = find_column(
     df.columns,
     [
         "Local Authority Name",
+        "Local Authority District Name",
         "Local Authority",
         "Local Authority District",
         "LAD Name",
@@ -274,9 +323,9 @@ region_col = find_column(
 )
 
 
-# --------------------------------------------------
+# ==================================================
 # Validate required columns
-# --------------------------------------------------
+# ==================================================
 
 missing = []
 
@@ -287,7 +336,8 @@ if census_col is None:
     missing.append("Census population")
 
 if list_col is None:
-    missing.append("GP registrations/list size")
+    missing.append("GP registrations / list size")
+
 
 if missing:
 
@@ -296,39 +346,42 @@ if missing:
         + ", ".join(missing)
     )
 
-    st.write("Columns found:", list(df.columns))
+    st.write(
+        "Columns detected in the CSV:",
+        list(df.columns),
+    )
 
     st.stop()
 
 
-# --------------------------------------------------
+# ==================================================
 # Prepare analytical dataset
-# --------------------------------------------------
+# ==================================================
 
 data = pd.DataFrame()
 
 data["Local authority"] = (
     df[name_col]
-    .astype(str)
+    .astype("string")
     .str.strip()
 )
 
-data["Census population"] = pd.to_numeric(
-    df[census_col],
-    errors="coerce",
+data["Census population"] = clean_numeric(
+    df[census_col]
 )
 
-data["GP registrations"] = pd.to_numeric(
-    df[list_col],
-    errors="coerce",
+data["GP registrations"] = clean_numeric(
+    df[list_col]
 )
+
 
 if code_col:
 
     data["Local authority code"] = (
         df[code_col]
-        .astype(str)
+        .astype("string")
         .str.strip()
+        .str.upper()
     )
 
 else:
@@ -340,7 +393,7 @@ if region_col:
 
     data["Region"] = (
         df[region_col]
-        .astype(str)
+        .astype("string")
         .str.strip()
     )
 
@@ -349,18 +402,20 @@ else:
     data["Region"] = "Not supplied"
 
 
-# Calculate the difference where necessary.
+# ==================================================
+# Calculate differences
+# ==================================================
 
 calculated_difference = (
     data["GP registrations"]
     - data["Census population"]
 )
 
+
 if diff_col:
 
-    supplied_difference = pd.to_numeric(
-        df[diff_col],
-        errors="coerce",
+    supplied_difference = clean_numeric(
+        df[diff_col]
     )
 
     data["Difference"] = supplied_difference.fillna(
@@ -372,7 +427,9 @@ else:
     data["Difference"] = calculated_difference
 
 
-# Calculate the percentage difference where necessary.
+# ==================================================
+# Calculate percentage differences
+# ==================================================
 
 calculated_percentage = (
     data["Difference"]
@@ -380,19 +437,17 @@ calculated_percentage = (
     * 100
 )
 
+
 if pct_col:
 
-    supplied_percentage = pd.to_numeric(
+    supplied_percentage = clean_numeric(
         df[pct_col]
-        .astype(str)
-        .str.replace("%", "", regex=False),
-        errors="coerce",
     )
 
-    # Support percentage values stored as either
-    # 7.0 or 0.07 to represent seven per cent.
-
     valid_percentages = supplied_percentage.dropna()
+
+    # If percentages are stored as fractions, e.g. 0.0745,
+    # convert them to percentage points, e.g. 7.45.
 
     if (
         not valid_percentages.empty
@@ -410,32 +465,59 @@ else:
     data["Percentage difference"] = calculated_percentage
 
 
-# Remove unusable population records.
+# ==================================================
+# Clean and validate records
+# ==================================================
+
+original_count = len(data)
 
 data = data.dropna(
     subset=[
+        "Local authority",
         "Census population",
         "GP registrations",
     ]
 ).copy()
 
 data = data[
-    data["Census population"] > 0
+    (data["Census population"] > 0)
+    & (data["Local authority"].str.len() > 0)
 ].copy()
+
+removed_count = original_count - len(data)
+
 
 if data.empty:
 
     st.error(
         "No usable population records remain. "
-        "Check the CSV data and column formats."
+        "Check the CSV columns and numerical formats."
+    )
+
+    st.write("CSV columns:", list(df.columns))
+
+    st.write(
+        "Sample of source records:",
+        df.head(10),
     )
 
     st.stop()
 
 
-# --------------------------------------------------
+# Display a diagnostic note if some rows were excluded.
+
+if removed_count > 0:
+
+    st.warning(
+        f"{removed_count:,} records were excluded because "
+        "their authority name or population figures were missing "
+        "or invalid."
+    )
+
+
+# ==================================================
 # Regional filter
-# --------------------------------------------------
+# ==================================================
 
 with st.sidebar:
 
@@ -469,9 +551,9 @@ if filtered.empty:
     st.stop()
 
 
-# --------------------------------------------------
+# ==================================================
 # Summary statistics
-# --------------------------------------------------
+# ==================================================
 
 total_census = filtered["Census population"].sum()
 
@@ -486,6 +568,7 @@ overall_percentage = (
     if total_census
     else 0
 )
+
 
 col1, col2, col3, col4 = st.columns(4)
 
@@ -509,25 +592,38 @@ col4.metric(
     f"{overall_percentage:+.2f}%",
 )
 
+
 st.caption(
     f"Showing {len(filtered):,} local-authority records. "
     "Totals reflect the currently selected regions."
 )
 
 
-# --------------------------------------------------
+# ==================================================
 # Load geographical boundaries
-# --------------------------------------------------
+# ==================================================
 
-geojson = load_geojson(geo_upload)
+try:
+
+    geojson = load_geojson(geo_upload)
+
+except Exception as exc:
+
+    st.warning(
+        f"Unable to read the GeoJSON boundary file: {exc}"
+    )
+
+    geojson = None
+
 
 if geojson is None:
 
     st.warning(
         "The geographical boundary file has not been supplied. "
-        "Upload a local-authority GeoJSON file or place it at "
-        "`data/local_authority_boundaries.geojson`. "
-        "The summary statistics and data table remain available."
+        "The summary statistics and data table remain available. "
+        "Add the file to "
+        "`data/local_authority_boundaries.geojson` "
+        "to enable the map."
     )
 
 else:
@@ -535,9 +631,9 @@ else:
     if not code_col:
 
         st.warning(
-            "The CSV has no identifiable local-authority code. "
-            "A reliable geographical join requires compatible "
-            "codes in both datasets."
+            "The CSV does not contain an identifiable "
+            "local-authority code. A reliable geographical join "
+            "requires compatible codes in both datasets."
         )
 
     else:
@@ -552,16 +648,18 @@ else:
             st.error(
                 "Could not identify a local-authority code "
                 "property in the GeoJSON. Check the boundary "
-                "file's properties and update the code "
-                "matching function if necessary."
+                "file's properties."
             )
 
         else:
 
-            # Normalise codes for reliable matching.
+            # Prepare geographic join codes.
+
+            filtered = filtered.copy()
 
             filtered["__join_code"] = (
                 filtered["Local authority code"]
+                .astype(str)
                 .str.strip()
                 .str.upper()
             )
@@ -601,9 +699,8 @@ else:
 
                 st.error(
                     "No local-authority codes matched the "
-                    "geographical boundaries. Check that the "
-                    "CSV and GeoJSON use compatible geography "
-                    "codes and boundary vintages."
+                    "geographical boundaries. Check the CSV "
+                    "and GeoJSON geography codes."
                 )
 
             else:
@@ -622,7 +719,6 @@ else:
                 colour_column = measure_columns[measure]
 
                 hover_columns = {
-                    "Local authority": True,
                     "Region": True,
                     "Census population": ":,.0f",
                     "GP registrations": ":,.0f",
@@ -658,7 +754,7 @@ else:
                         "Region":
                             "Region",
                     },
-                    title=f"England local authorities — {measure}",
+                    title=f"Local authorities — {measure}",
                 )
 
                 fig.update_geos(
@@ -705,9 +801,9 @@ else:
                     )
 
 
-# --------------------------------------------------
-# Local authority explorer
-# --------------------------------------------------
+# ==================================================
+# Local-authority explorer
+# ==================================================
 
 st.subheader("Explore a local authority")
 
@@ -761,9 +857,9 @@ with right:
     )
 
 
-# --------------------------------------------------
+# ==================================================
 # Regional comparison
-# --------------------------------------------------
+# ==================================================
 
 regional_data = filtered[
     filtered["Region"] == selected["Region"]
@@ -782,28 +878,42 @@ if (
         "GP registrations"
     ].sum()
 
+    regional_difference = (
+        regional_registrations - regional_census
+    )
+
     regional_percentage = (
-        (
-            regional_registrations
-            - regional_census
-        )
-        / regional_census
-        * 100
+        regional_difference / regional_census * 100
         if regional_census
         else 0
     )
 
-    st.caption(
-        f"Regional comparison — {selected['Region']}: "
-        f"{regional_registrations:,.0f} GP registrations "
-        f"versus {regional_census:,.0f} Census population "
-        f"({regional_percentage:+.2f}%)."
+    st.subheader(
+        f"Regional comparison: {selected['Region']}"
+    )
+
+    region_col1, region_col2, region_col3 = st.columns(3)
+
+    region_col1.metric(
+        "Census population",
+        f"{regional_census:,.0f}",
+    )
+
+    region_col2.metric(
+        "GP registrations",
+        f"{regional_registrations:,.0f}",
+    )
+
+    region_col3.metric(
+        "Difference",
+        f"{regional_difference:+,.0f}",
+        delta=f"{regional_percentage:+.2f}% of Census population",
     )
 
 
-# --------------------------------------------------
-# Data table
-# --------------------------------------------------
+# ==================================================
+# Local-authority data table
+# ==================================================
 
 st.subheader("Local-authority data")
 
@@ -828,15 +938,15 @@ st.dataframe(
     column_config={
         "Census population":
             st.column_config.NumberColumn(
-                format="%d"
+                format="%,.0f"
             ),
         "GP registrations":
             st.column_config.NumberColumn(
-                format="%d"
+                format="%,.0f"
             ),
         "Difference":
             st.column_config.NumberColumn(
-                format="%+d"
+                format="%+,.0f"
             ),
         "Percentage difference":
             st.column_config.NumberColumn(
@@ -846,15 +956,16 @@ st.dataframe(
 )
 
 
-# --------------------------------------------------
+# ==================================================
 # Source and interpretation
-# --------------------------------------------------
+# ==================================================
 
 st.divider()
 
 st.caption(
     "Source: NHS Digital, Patients Registered at a GP Practice "
     "(August 2022), and Census 2021 population figures. "
-    "Check the source documentation, reference dates and "
-    "geographical definitions before drawing conclusions."
+    "Check the original source documentation, reference dates, "
+    "geographical definitions and coverage before drawing "
+    "conclusions."
 )
